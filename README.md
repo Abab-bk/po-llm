@@ -2,6 +2,18 @@
 
 A command-line tool for translating `.po` files using Large Language Models (LLMs). Currently supports OpenAI-compatible APIs only.
 
+## Install
+
+```
+cargo install po-llm
+```
+
+```
+yay -S po-llm-bin
+```
+
+Or: [release](https://github.com/Abab-bk/po-llm/releases)
+
 ## Usage
 
 You need a `toml` file to configure the software:
@@ -24,14 +36,12 @@ name = "Untitled Project"
 context = "Project description for LLM context."
 base_path = "po-files/" # Base directory for input/output patterns
 skip_translated = true # Whether to skip entries that already have translations
-
 ```
 
 To run:
 
 ```sh
 po-llm 'config.toml'
-
 ```
 
 ### Full Arguments
@@ -61,7 +71,6 @@ struct Args {
     )]
     lang_concurrent: usize,
 }
-
 ```
 
 ## Credits
