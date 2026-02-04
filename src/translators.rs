@@ -25,7 +25,7 @@ pub trait Translator {
         &self,
         target_lang: &str,
         translation_units: &[TranslationUnit],
-        custome_prompt: &Option<String>,
+        custom_prompt: &Option<String>,
     ) -> Result<TranslationResult>;
 }
 
@@ -37,7 +37,7 @@ impl Translator for DryRunTranslator {
         &self,
         target_lang: &str,
         translation_units: &[TranslationUnit],
-        _custome_prompt: &Option<String>,
+        _custom_prompt: &Option<String>,
     ) -> Result<TranslationResult> {
         Ok(TranslationResult {
             translated: translation_units
@@ -47,11 +47,15 @@ impl Translator for DryRunTranslator {
 
                     if unit.is_plural() {
                         result.msg_str_plural = Some(vec![
-                            format!("[{}] {}", target_lang, unit.msg_id),
-                            format!("[{}] {}", target_lang, unit.msg_id_plural.as_ref().unwrap()),
+                            format!("[DRY:{}] {}", target_lang, unit.msg_id),
+                            format!(
+                                "[DRY:{}] {}",
+                                target_lang,
+                                unit.msg_id_plural.as_ref().unwrap()
+                            ),
                         ]);
                     } else {
-                        result.msg_str = Some(format!("[{}] {}", target_lang, unit.msg_id));
+                        result.msg_str = Some(format!("[DRY:{}] {}", target_lang, unit.msg_id));
                     }
 
                     result
@@ -65,6 +69,7 @@ impl Translator for DryRunTranslator {
 pub struct LlmTranslator<T: Config> {
     pub client: Client<T>,
     pub model: String,
+    pub system_prompt: String,
     pub project_context: String,
 }
 
@@ -77,7 +82,7 @@ where
         &self,
         target_lang: &str,
         translation_units: &[TranslationUnit],
-        custome_prompt: &Option<String>,
+        custom_prompt: &Option<String>,
     ) -> Result<TranslationResult> {
         if translation_units.is_empty() {
             return Ok(TranslationResult {
@@ -87,52 +92,37 @@ where
         }
 
         let mut prompt = String::new();
-        prompt.push_str("# Translation Task\n\n");
-
-        for (index, unit) in translation_units.iter().enumerate() {
-            prompt.push_str(&format!("## Message {}\n", index + 1));
-
-            if let Some(context) = &unit.context {
-                prompt.push_str(&format!("**Context**: {}\n", context));
+        for (idx, unit) in translation_units.iter().enumerate() {
+            prompt.push_str(&format!("**Index**: {}\n", idx));
+            prompt.push_str(&format!("Source: {}\n", unit.msg_id));
+            if let Some(ctx) = &unit.context {
+                prompt.push_str(&format!("Context: {}\n", ctx));
             }
-
-            if unit.is_plural() {
-                prompt.push_str(&format!("**Singular**: {}\n", unit.msg_id));
-                prompt.push_str(&format!(
-                    "**Plural**: {}\n",
-                    unit.msg_id_plural.as_ref().unwrap()
-                ));
-            } else {
-                prompt.push_str(&format!("**Text**: {}\n", unit.msg_id));
+            if let Some(plural) = &unit.msg_id_plural {
+                prompt.push_str(&format!("Plural Source: {}\n", plural));
             }
-
-            prompt.push('\n');
+            prompt.push_str("\n---\n");
         }
 
-        let user_prompt = match custome_prompt {
+        let custom_prompt_text = match custom_prompt {
             Some(content) => format!("## User Instructions:\n{}\n", content),
             None => String::new(),
         };
 
-        let system_content = format!(
-            "You are a professional localization expert translating strings to {}.\n\
-            \n\
-            ## Project Context\n\
-            {}\n\
-            \n\
-            ## Rules\n\
-            - Do NOT modify msg_id or msg_id_plural\n\
-            - Preserve all placeholders exactly ({0}, %s, {{name}}, etc.)\n\
-            - Match tone and formality of the source\n\
-            - Singular → msg_str\n\
-            - Plural → msg_str_plural, provide an ARRAY of strings.\n\
-            \n\
-            {}
-            Return a JSON array of translation units with the EXACT structure provided.",
-            target_lang, self.project_context, user_prompt
-        );
+        let system_content = self
+            .system_prompt
+            .replace("{target_lang}", target_lang)
+            .replace("{project_context}", &self.project_context)
+            .replace("{custom_prompt}", &custom_prompt_text);
 
-        let schema_value = schema_for!(Vec<TranslationUnit>).to_value();
+        #[derive(schemars::JsonSchema, serde::Deserialize)]
+        struct LlmResponseUnit {
+            index: usize,
+            msg_str: Option<String>,
+            msg_str_plural: Option<Vec<String>>,
+        }
+
+        let schema_value = schema_for!(Vec<LlmResponseUnit>).to_value();
 
         let schema = ResponseFormat::JsonSchema {
             json_schema: ResponseFormatJsonSchema {
@@ -150,38 +140,69 @@ where
                 ChatCompletionRequestUserMessage::from(prompt).into(),
             ])
             .response_format(schema)
-            .build()?;
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build API request: {}", e))?;
 
-        let response = self.client.chat().create(request).await?;
+        let response = self
+            .client
+            .chat()
+            .create(request)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "LLM API call failed for language '{}': {}. Check your API key, base URL, and network connectivity.",
+                    target_lang,
+                    e
+                )
+            })?;
 
         let content = response
             .choices
             .first()
             .and_then(|choice| choice.message.content.as_ref())
-            .ok_or_else(|| anyhow::anyhow!("LLM returned empty response"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LLM returned empty response for language '{}'. The model may not support structured outputs or encountered an error.",
+                    target_lang
+                )
+            })?;
 
-        let results: Vec<TranslationUnit> = serde_json::from_str(content).map_err(|e| {
-            anyhow::anyhow!("Failed to parse LLM response: {}, response: {}", e, content)
+        let results: Vec<LlmResponseUnit> = serde_json::from_str(content).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse LLM JSON response for language '{}':\n  Parse error: {}\n  Response preview: {}\n  This may indicate the model is not following the structured output format.",
+                target_lang,
+                e,
+                content.chars().take(500).collect::<String>()
+            )
         })?;
 
-        let mut result_map: HashMap<String, TranslationUnit> = results
-            .into_iter()
-            .map(|unit| (unit.msg_id.clone(), unit))
-            .collect();
+        if results.is_empty() && !translation_units.is_empty() {
+            return Err(anyhow::anyhow!(
+                "LLM returned empty translation array for {} messages in language '{}'. Expected {} translations.",
+                translation_units.len(),
+                target_lang,
+                translation_units.len()
+            ));
+        }
+
+        let mut result_map: HashMap<usize, LlmResponseUnit> =
+            results.into_iter().map(|u| (u.index, u)).collect();
 
         let mut translated = Vec::new();
         let mut failed = Vec::new();
 
-        for original_unit in translation_units {
-            if let Some(translated_unit) = result_map.remove(&original_unit.msg_id) {
-                let is_valid = if translated_unit.is_plural() {
-                    translated_unit
+        for (idx, original_unit) in translation_units.iter().enumerate() {
+            if let Some(res_unit) = result_map.remove(&idx) {
+                let mut final_unit = original_unit.clone();
+
+                let is_valid = if original_unit.is_plural() {
+                    res_unit
                         .msg_str_plural
                         .as_ref()
                         .map(|v| !v.is_empty() && v.iter().all(|s| !s.trim().is_empty()))
                         .unwrap_or(false)
                 } else {
-                    translated_unit
+                    res_unit
                         .msg_str
                         .as_ref()
                         .map(|s| !s.trim().is_empty())
@@ -189,15 +210,31 @@ where
                 };
 
                 if is_valid {
-                    println!("translated: {} -> {}", original_unit, translated_unit);
-                    translated.push(translated_unit);
+                    final_unit.msg_str = res_unit.msg_str;
+                    final_unit.msg_str_plural = res_unit.msg_str_plural;
+                    translated.push(final_unit);
                 } else {
-                    println!("failed: {} -> {}", original_unit, translated_unit);
+                    eprintln!(
+                        "      ⚠️  Invalid translation for '{}' in {}: empty or whitespace-only | translated: {}",
+                        original_unit.msg_id, target_lang, content
+                    );
                     failed.push(original_unit.clone());
                 }
             } else {
+                eprintln!(
+                    "      ⚠️  Missing translation for '{}' in {}: not found in LLM response",
+                    original_unit.msg_id, target_lang
+                );
                 failed.push(original_unit.clone());
             }
+        }
+
+        if !result_map.is_empty() {
+            eprintln!(
+                "      ⚠️  LLM returned {} unexpected translations not in the original batch \n response: {}",
+                result_map.len(),
+                content
+            );
         }
 
         Ok(TranslationResult {
