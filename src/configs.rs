@@ -12,6 +12,7 @@ pub struct LlmConfig {
     pub api_base: String,
     pub api_key: String,
     pub model: String,
+    pub custom_prompt: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]

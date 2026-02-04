@@ -23,6 +23,7 @@ You need a `toml` file to configure the software:
 api_base = "https://api.xxx.com/v1"
 api_key = "your-token"
 model = "model-name"
+custom_prompt = "your prompt" # option
 
 [translation]
 # Language names provided to the LLM (can be any descriptive string)

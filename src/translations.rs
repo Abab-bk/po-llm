@@ -124,7 +124,11 @@ impl Translatable for GettextAdapter {
         let metadata = CatalogMetadata::parse(&metadata_content)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        let mut catalog = Catalog::new(metadata);
+        let mut catalog = if output_path.exists() {
+            polib::po_file::parse(output_path).unwrap_or(Catalog::new(metadata))
+        } else {
+            Catalog::new(metadata)
+        };
 
         for translation in translations {
             let message = if translation.is_plural() {

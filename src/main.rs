@@ -288,7 +288,9 @@ async fn process_single_lang(
 
     for batch in messages.chunks(config.translation.batch_size) {
         let translations = if dry_run {
-            DryRunTranslator.translate(target_lang, batch).await?
+            DryRunTranslator
+                .translate(target_lang, batch, &config.llm.custom_prompt)
+                .await?
         } else {
             let client = Client::with_config(
                 OpenAIConfig::new()
@@ -301,7 +303,8 @@ async fn process_single_lang(
                 model: config.llm.model.clone(),
                 project_context: config.project.context.clone(),
             };
-            llm.translate(target_lang, batch).await?
+            llm.translate(target_lang, batch, &config.llm.custom_prompt)
+                .await?
         };
 
         total_translated += translations.translated.len();

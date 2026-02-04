@@ -25,6 +25,7 @@ pub trait Translator {
         &self,
         target_lang: &str,
         translation_units: &[TranslationUnit],
+        custome_prompt: &Option<String>,
     ) -> Result<TranslationResult>;
 }
 
@@ -36,6 +37,7 @@ impl Translator for DryRunTranslator {
         &self,
         target_lang: &str,
         translation_units: &[TranslationUnit],
+        _custome_prompt: &Option<String>,
     ) -> Result<TranslationResult> {
         Ok(TranslationResult {
             translated: translation_units
@@ -75,6 +77,7 @@ where
         &self,
         target_lang: &str,
         translation_units: &[TranslationUnit],
+        custome_prompt: &Option<String>,
     ) -> Result<TranslationResult> {
         if translation_units.is_empty() {
             return Ok(TranslationResult {
@@ -106,6 +109,11 @@ where
             prompt.push('\n');
         }
 
+        let user_prompt = match custome_prompt {
+            Some(content) => format!("## User Instructions:\n{}\n", content),
+            None => String::new(),
+        };
+
         let system_content = format!(
             "You are a professional localization expert translating strings to {}.\n\
             \n\
@@ -117,10 +125,11 @@ where
             - Preserve all placeholders exactly ({0}, %s, {{name}}, etc.)\n\
             - Match tone and formality of the source\n\
             - Singular → msg_str\n\
-            - Plural → msg_str_plural, provide forms for: [zero/one, multiple]\n\
+            - Plural → msg_str_plural, provide an ARRAY of strings.\n\
             \n\
+            {}
             Return a JSON array of translation units with the EXACT structure provided.",
-            target_lang, self.project_context
+            target_lang, self.project_context, user_prompt
         );
 
         let schema_value = schema_for!(Vec<TranslationUnit>).to_value();
@@ -151,8 +160,9 @@ where
             .and_then(|choice| choice.message.content.as_ref())
             .ok_or_else(|| anyhow::anyhow!("LLM returned empty response"))?;
 
-        let results: Vec<TranslationUnit> = serde_json::from_str(content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse LLM response: {}", e))?;
+        let results: Vec<TranslationUnit> = serde_json::from_str(content).map_err(|e| {
+            anyhow::anyhow!("Failed to parse LLM response: {}, response: {}", e, content)
+        })?;
 
         let mut result_map: HashMap<String, TranslationUnit> = results
             .into_iter()
@@ -179,8 +189,10 @@ where
                 };
 
                 if is_valid {
+                    println!("translated: {} -> {}", original_unit, translated_unit);
                     translated.push(translated_unit);
                 } else {
+                    println!("failed: {} -> {}", original_unit, translated_unit);
                     failed.push(original_unit.clone());
                 }
             } else {
